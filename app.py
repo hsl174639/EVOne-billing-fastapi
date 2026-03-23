@@ -1,84 +1,122 @@
 from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import Response
+from typing import List
 import pandas as pd
 import io
 import warnings
 
-# 忽略 pandas 的一些格式警告
 warnings.filterwarnings('ignore')
 
 app = FastAPI(title="EV Billing Auto-Merge API")
 
-# 测试接口：用于检查服务是否正常运行
 @app.get("/")
 def read_root():
-    return {"status": "✅ 充电账单合并 API 正在运行！"}
+    return {"status": "✅ API 正在运行，已开启文件名模糊匹配功能！"}
 
-# 核心处理接口：接收文件，返回 Excel
+# --- 辅助函数：根据后缀自动读取 csv 或 excel ---
+async def load_dataframe(file: UploadFile, sheet_name=None):
+    content = await file.read()
+    name = file.filename.lower()
+    
+    if name.endswith('.csv'):
+        # CSV 文件不需要 sheet_name
+        return pd.read_csv(io.BytesIO(content))
+    elif name.endswith(('.xls', '.xlsx')):
+        if sheet_name:
+            try:
+                return pd.read_excel(io.BytesIO(content), sheet_name=sheet_name)
+            except Exception:
+                # 如果指定的 sheet 不存在，回退读取默认第一页
+                return pd.read_excel(io.BytesIO(content))
+        return pd.read_excel(io.BytesIO(content))
+    else:
+        raise ValueError(f"不支持的文件格式: {file.filename}")
+
+
 @app.post("/process-billing")
-async def process_billing(
-    gp_tx: UploadFile = File(..., description="GoParkin 交易 CSV"),
-    gp_crm: UploadFile = File(..., description="GoParkin CRM Excel"),
-    sp_tx: UploadFile = File(..., description="SP 交易 Excel"),
-    sp_crm: UploadFile = File(..., description="SP CRM Excel")
-):
+async def process_billing(files: List[UploadFile] = File(..., description="一次性上传所有源文件")):
     try:
         # ==========================================
-        # 1. 将接收到的网络文件读取进内存
+        # 1. 文件名智能模糊匹配 (Fuzzy Matching)
         # ==========================================
-        gp_tx_bytes = await gp_tx.read()
-        gp_crm_bytes = await gp_crm.read()
-        sp_tx_bytes = await sp_tx.read()
-        sp_crm_bytes = await sp_crm.read()
+        gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
+        
+        for f in files:
+            name = f.filename.lower()
+            
+            # 规则1: 包含 'goparkin' 且包含 'transaction' 或 'row' -> GoParkin 交易
+            if 'goparkin' in name and ('transaction' in name or 'row' in name):
+                gp_tx = f
+            # 规则2: 包含 'goparkin' 且包含 'crm' 或 'vehicle' -> GoParkin CRM
+            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name):
+                gp_crm = f
+            # 规则3: 包含 'sp' 且包含 'crm' 或 'vehicle' -> SP CRM
+            # 注意: 'sp ' 加空格是为了防止匹配到单词里的 sp (如 'speed')
+            elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name):
+                sp_crm = f
+            # 规则4: 包含 'evone' 且包含 'report' 或 'breakdown' 或 'fleet' -> SP 交易
+            elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name):
+                sp_tx = f
+
+        # 检查是否四个文件都集齐了
+        missing = []
+        if not gp_tx: missing.append("GoParkin 交易记录")
+        if not gp_crm: missing.append("GoParkin CRM")
+        if not sp_tx: missing.append("SP 交易记录")
+        if not sp_crm: missing.append("SP CRM")
+        
+        if missing:
+            return {
+                "error": True, 
+                "message": f"文件匹配失败！缺少以下文件角色: {', '.join(missing)}。请检查文件名是否包含关键识别词。"
+            }
 
         # ==========================================
-        # 2. GoParkin 数据处理逻辑
+        # 2. 动态读取数据 (支持 CSV / Excel)
         # ==========================================
-        # 处理 GoParkin CRM
-        crm_gp = pd.read_excel(io.BytesIO(gp_crm_bytes))
+        crm_gp = await load_dataframe(gp_crm)
+        df_gp  = await load_dataframe(gp_tx)
+        crm_sp = await load_dataframe(sp_crm)
+        df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet') # 如果是Excel会读这页，CSV则忽略
+
+        # ==========================================
+        # 3. GoParkin 数据处理逻辑
+        # ==========================================
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
 
-        # 处理 GoParkin 交易记录
-        df_gp = pd.read_csv(io.BytesIO(gp_tx_bytes))
         df_gp = df_gp[df_gp['payment_status'] == 'Success'].copy()
         df_gp['vehicle_plate_number'] = df_gp['vehicle_plate_number'].astype(str).str.strip().str.upper()
         df_gp['Year-Month'] = df_gp['start_date_time'].astype(str).str[0:7]
 
-        # 合并 GoParkin 数据并计算汇总
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
         gp_summary = gp_merged.groupby(['Company', 'Year-Month'])['total_energy_supplied_kwh'].sum().reset_index()
         gp_summary.rename(columns={'total_energy_supplied_kwh': 'GoParkin(kWh)'}, inplace=True)
 
         # ==========================================
-        # 3. SP 数据处理逻辑
+        # 4. SP 数据处理逻辑
         # ==========================================
-        # 处理 SP CRM
-        crm_sp = pd.read_excel(io.BytesIO(sp_crm_bytes))
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
 
-        # 处理 SP 交易记录 (读取指定 sheet)
-        df_sp = pd.read_excel(io.BytesIO(sp_tx_bytes), sheet_name='EVOne Corporate fleet')
         df_sp['Driver Email'] = df_sp['Driver Email'].astype(str).str.strip().str.lower()
         df_sp['Year-Month'] = df_sp['Date'].astype(str).str[0:7]
         df_sp['CDR Total Energy'] = pd.to_numeric(df_sp['CDR Total Energy'], errors='coerce').fillna(0)
 
-        # 合并 SP 数据并计算汇总
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
         sp_summary = sp_merged.groupby(['Company', 'Year-Month'])['CDR Total Energy'].sum().reset_index()
         sp_summary.rename(columns={'CDR Total Energy': 'SP(kWh)'}, inplace=True)
 
         # ==========================================
-        # 4. 最终数据合并与规整
+        # 5. 最终数据合并与规整
         # ==========================================
         final_df = pd.merge(gp_summary, sp_summary, on=['Company', 'Year-Month'], how='outer').fillna(0)
         final_df['Total(kWh)'] = final_df.get('GoParkin(kWh)', 0) + final_df.get('SP(kWh)', 0)
 
         # ==========================================
-        # 5. 生成多 Sheet 的 Excel 文件（写回内存）
+        # 6. 生成多 Sheet 的 Excel 文件
         # ==========================================
         output = io.BytesIO()
         months = sorted([m for m in final_df['Year-Month'].dropna().unique() if len(str(m)) == 7])
@@ -87,12 +125,9 @@ async def process_billing(
             for month in months:
                 month_df = final_df[final_df['Year-Month'] == month].copy()
                 month_df = month_df.sort_values(by='Company').reset_index(drop=True)
-                month_df.insert(0, 'S/N', month_df.index + 1)  # 插入序号列
+                month_df.insert(0, 'S/N', month_df.index + 1)
                 month_df.to_excel(writer, sheet_name=month, index=False)
 
-        # ==========================================
-        # 6. 将生成的 Excel 作为 HTTP 附件返回
-        # ==========================================
         excel_data = output.getvalue()
         return Response(
             content=excel_data,
@@ -101,5 +136,4 @@ async def process_billing(
         )
 
     except Exception as e:
-        # 如果出错，返回错误信息以便在 n8n/Make 中排查
         return {"error": True, "message": str(e)}
