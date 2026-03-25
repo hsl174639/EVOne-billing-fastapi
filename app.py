@@ -87,7 +87,7 @@ async def process_billing(files: List[UploadFile] = File(..., description="ä¸€æ¬
 
         df_gp = df_gp[df_gp['payment_status'] == 'Success'].copy()
         df_gp['vehicle_plate_number'] = df_gp['vehicle_plate_number'].astype(str).str.strip().str.upper()
-        df_gp['Year-Month'] = df_gp['start_date_time'].astype(str).str[0:7]
+        df_gp['Year-Month'] = df_gp['end_date_time'].astype(str).str[0:7]
 
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
