@@ -7,7 +7,6 @@ import warnings
 import gc
 import zipfile
 
-# 引入生成 PDF 的专用库
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib import colors
@@ -19,10 +18,12 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! 3-in-1 Endpoints (Summary Excel, Details Excel, PDF ZIP) are all enabled!"}
+    return {"status": "✅ API is running! 3-in-1 Endpoints with Safety Checks enabled!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
+    if not file:
+        raise ValueError("File is missing!")
     name = file.filename.lower()
     if name.endswith('.csv'):
         return pd.read_csv(file.file)
@@ -51,12 +52,19 @@ async def process_billing(files: List[UploadFile] = File(...)):
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
             elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
 
+        missing = []
+        if not gp_tx: missing.append("GoParkin Transaction")
+        if not gp_crm: missing.append("GoParkin CRM")
+        if not sp_tx: missing.append("SP Transaction")
+        if not sp_crm: missing.append("SP CRM")
+        if missing:
+            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
 
-        # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
@@ -71,7 +79,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
         gp_summary = gp_merged.groupby(['Company', 'Year-Month'])['total_energy_supplied_kwh'].sum().reset_index()
         gp_summary.rename(columns={'total_energy_supplied_kwh': 'GoParkin(kWh)'}, inplace=True)
 
-        # SP 清洗
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
@@ -83,7 +90,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
         sp_summary = sp_merged.groupby(['Company', 'Year-Month'])['CDR Total Energy'].sum().reset_index()
         sp_summary.rename(columns={'CDR Total Energy': 'SP(kWh)'}, inplace=True)
 
-        # 合并生成汇总
         final_df = pd.merge(gp_summary, sp_summary, on=['Company', 'Year-Month'], how='outer').fillna(0)
         final_df['Total(kWh)'] = final_df.get('GoParkin(kWh)', 0) + final_df.get('SP(kWh)', 0)
 
@@ -118,12 +124,19 @@ async def process_details(files: List[UploadFile] = File(...)):
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
             elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
 
+        missing = []
+        if not gp_tx: missing.append("GoParkin Transaction")
+        if not gp_crm: missing.append("GoParkin CRM")
+        if not sp_tx: missing.append("SP Transaction")
+        if not sp_crm: missing.append("SP CRM")
+        if missing:
+            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
 
-        # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
@@ -135,7 +148,6 @@ async def process_details(files: List[UploadFile] = File(...)):
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
 
-        # SP 清洗
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
@@ -235,27 +247,37 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name or 'rate' in name: rate_file = f
+            # 👉 【修复】严格识别小写 threshold and rate
+            if 'threshold and rate' in name: rate_file = f
             elif 'goparkin' in name and ('transaction' in name or 'row' in name): gp_tx = f
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
             elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
 
+        # 👉 【修复】报错提示统一为小写
+        missing = []
+        if not gp_tx: missing.append("GoParkin Transaction")
+        if not gp_crm: missing.append("GoParkin CRM")
+        if not sp_tx: missing.append("SP Transaction")
+        if not sp_crm: missing.append("SP CRM")
+        if not rate_file: missing.append("threshold and rate")
+        if missing:
+            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
+        df_rates = await load_dataframe(rate_file)
         
         rates_dict = {}
-        if rate_file:
-            df_rates = await load_dataframe(rate_file)
-            for _, row in df_rates.iterrows():
-                comp_name = str(row.get('company', '')).strip().lower()
-                rates_dict[comp_name] = {
-                    'base': pd.to_numeric(row.get('base', 0), errors='coerce'),
-                    'threshold': pd.to_numeric(row.get('Threshold', 0), errors='coerce'),
-                    'discounted': pd.to_numeric(row.get('discounted', 0), errors='coerce')
-                }
+        for _, row in df_rates.iterrows():
+            comp_name = str(row.get('company', '')).strip().lower()
+            rates_dict[comp_name] = {
+                'base': pd.to_numeric(row.get('base', 0), errors='coerce'),
+                'threshold': pd.to_numeric(row.get('Threshold', 0), errors='coerce'),
+                'discounted': pd.to_numeric(row.get('discounted', 0), errors='coerce')
+            }
 
         # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
@@ -371,7 +393,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     file_name = f"{month}/{safe_comp}_{month}.pdf"
                     zip_file.writestr(file_name, pdf_buf.getvalue())
 
-        del df_gp, df_sp, gp_merged, sp_merged, all_details
+        del df_gp, df_sp, gp_merged, sp_merged, all_details, df_rates
         gc.collect()
 
         return Response(content=zip_buffer.getvalue(), media_type="application/zip", headers={"Content-Disposition": "attachment; filename=Monthly_PDF_Reports.zip"})
