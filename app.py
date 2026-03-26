@@ -12,9 +12,9 @@ app = FastAPI(title="EV Billing & Details API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API 正在运行，已将 Corporate 筛选应用于 GoParkin，包含双接口！"}
+    return {"status": "✅ API is running smoothly. Corporate filter applied to GoParkin. Dual endpoints available! (Full months enabled)"}
 
-# --- 辅助函数：极致省内存的文件读取方式 ---
+# --- Helper Function: Memory-efficient file reader ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
     name = file.filename.lower()
     if name.endswith('.csv'):
@@ -28,10 +28,10 @@ async def load_dataframe(file: UploadFile, sheet_name=None):
                 return pd.read_excel(file.file)
         return pd.read_excel(file.file)
     else:
-        raise ValueError(f"不支持的文件格式: {file.filename}")
+        raise ValueError(f"Unsupported file format: {file.filename}")
 
 # =====================================================================
-# 接口 1：生成无明细的【按月汇总表】 
+# Endpoint 1: Generate Monthly Summary Report (No Details)
 # =====================================================================
 @app.post("/process-billing")
 async def process_billing(files: List[UploadFile] = File(...)):
@@ -49,41 +49,42 @@ async def process_billing(files: List[UploadFile] = File(...)):
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
 
-        # ---------------- GoParkin 处理 ----------------
+        # ---------------- GoParkin Processing ----------------
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
         
-        # 1. 过滤支付状态
+        # 1. Filter Payment Status
         if 'payment_status' in df_gp.columns:
             df_gp = df_gp[df_gp['payment_status'] == 'Success'].copy()
             
-        # 2. 【关键修改】过滤交易类型为 Corporate (应用于 GoParkin)
+        # 2. Filter Transaction Type (Corporate only)
         if 'transaction_type' in df_gp.columns:
             df_gp = df_gp[df_gp['transaction_type'].astype(str).str.strip().str.lower() == 'corporate'].copy()
             
         df_gp['vehicle_plate_number'] = df_gp['vehicle_plate_number'].astype(str).str.strip().str.upper()
         df_gp['Year-Month'] = df_gp['end_date_time'].astype(str).str[0:7]
+
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
         gp_summary = gp_merged.groupby(['Company', 'Year-Month'])['total_energy_supplied_kwh'].sum().reset_index()
         gp_summary.rename(columns={'total_energy_supplied_kwh': 'GoParkin(kWh)'}, inplace=True)
 
-        # ---------------- SP 处理 ----------------
+        # ---------------- SP Processing ----------------
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
         
-        # SP 不再进行 Corporate 筛选，直接读取并清洗格式
         df_sp['Driver Email'] = df_sp['Driver Email'].astype(str).str.strip().str.lower()
         df_sp['Year-Month'] = df_sp['Date'].astype(str).str[0:7]
+        
         df_sp['CDR Total Energy'] = pd.to_numeric(df_sp['CDR Total Energy'], errors='coerce').fillna(0)
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
         sp_summary = sp_merged.groupby(['Company', 'Year-Month'])['CDR Total Energy'].sum().reset_index()
         sp_summary.rename(columns={'CDR Total Energy': 'SP(kWh)'}, inplace=True)
 
-        # ---------------- 合并生成汇总 ----------------
+        # ---------------- Merge & Generate Output ----------------
         final_df = pd.merge(gp_summary, sp_summary, on=['Company', 'Year-Month'], how='outer').fillna(0)
         final_df['Total(kWh)'] = final_df.get('GoParkin(kWh)', 0) + final_df.get('SP(kWh)', 0)
 
@@ -105,7 +106,7 @@ async def process_billing(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 2：生成一公司一页的【绿色排版高级明细表】
+# Endpoint 2: Generate Advanced Detailed Report (One Company per Sheet)
 # =====================================================================
 @app.post("/process-details")
 async def process_details(files: List[UploadFile] = File(...)):
@@ -123,35 +124,36 @@ async def process_details(files: List[UploadFile] = File(...)):
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
 
-        # ---------------- GoParkin 清洗 ----------------
+        # ---------------- GoParkin Cleansing ----------------
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
         
-        # 1. 过滤支付状态
         if 'payment_status' in df_gp.columns:
             df_gp = df_gp[df_gp['payment_status'] == 'Success'].copy()
             
-        # 2. 【关键修改】过滤交易类型为 Corporate (应用于 GoParkin)
         if 'transaction_type' in df_gp.columns:
             df_gp = df_gp[df_gp['transaction_type'].astype(str).str.strip().str.lower() == 'corporate'].copy()
             
         df_gp['vehicle_plate_number'] = df_gp['vehicle_plate_number'].astype(str).str.strip().str.upper()
+        df_gp['Year-Month'] = df_gp['end_date_time'].astype(str).str[0:7]
+        
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
 
-        # ---------------- SP 清洗 ----------------
+        # ---------------- SP Cleansing ----------------
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
         
-        # SP 不做 Corporate 筛选
         df_sp['Driver Email'] = df_sp['Driver Email'].astype(str).str.strip().str.lower()
+        df_sp['Year-Month'] = df_sp['Date'].astype(str).str[0:7]
+        
         df_sp['CDR Total Energy'] = pd.to_numeric(df_sp['CDR Total Energy'], errors='coerce').fillna(0)
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
 
-        # ---------------- 提取明细标准格式 ----------------
+        # ---------------- Extract Standardized Details ----------------
         def extract_details(df, source):
             res = pd.DataFrame()
             if df.empty: return res
@@ -173,7 +175,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         all_details = pd.concat([extract_details(gp_merged, 'GP'), extract_details(sp_merged, 'SP')], ignore_index=True)
         all_details = all_details[all_details['Energy (kWh)'] > 0]
 
-        # ---------------- 生成高级排版 Excel ----------------
+        # ---------------- Generate Advanced Formatted Excel ----------------
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             workbook = writer.book
@@ -187,14 +189,14 @@ async def process_details(files: List[UploadFile] = File(...)):
                 safe_sheet_name = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
                 comp_df = all_details[all_details['Company'] == company]
                 worksheet = workbook.add_worksheet(safe_sheet_name)
-                worksheet.set_column(0, 0, 25)
-                worksheet.set_column(1, 2, 20)
-                worksheet.set_column(3, 3, 15)
+                worksheet.set_column(0, 0, 30)
+                worksheet.set_column(1, 2, 22)
+                worksheet.set_column(3, 3, 18)
                 
                 veh_summary = comp_df.groupby('Vehicle_Email')['Energy (kWh)'].sum().reset_index().sort_values('Energy (kWh)', ascending=False)
-                worksheet.write(0, 0, f"【{company}】 车辆电量总计", title_fmt)
-                worksheet.write(2, 0, "车辆 / 邮箱", header_green)
-                worksheet.write(2, 1, "总使用电量 (kWh)", header_green)
+                worksheet.write(0, 0, f"[{company}] Total Vehicle Energy", title_fmt)
+                worksheet.write(2, 0, "Vehicle / Driver Email", header_green)
+                worksheet.write(2, 1, "Total Energy Used (kWh)", header_green)
                 row = 3
                 for _, v_row in veh_summary.iterrows():
                     worksheet.write(row, 0, v_row['Vehicle_Email'], cell_normal)
@@ -202,7 +204,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                     row += 1
                 
                 row += 3
-                worksheet.write(row, 0, "Detailed Report", title_fmt)
+                worksheet.write(row, 0, "==== Detailed Charging Log ====", title_fmt)
                 row += 2
                 for vehicle, grp in comp_df.groupby('Vehicle_Email'):
                     worksheet.merge_range(row, 0, row, 1, "Vehicle / Driver Email:", header_green)
