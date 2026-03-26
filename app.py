@@ -18,7 +18,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! PDF now includes Detailed Transaction Logs!"}
+    return {"status": "✅ API is running! Invoice Summary now includes Dynamic Pricing!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -39,15 +39,15 @@ async def load_dataframe(file: UploadFile, sheet_name=None):
         raise ValueError(f"Unsupported file format: {file.filename}")
 
 # =====================================================================
-# 接口 1：生成无明细的【按月汇总表 Excel】
+# 接口 1：生成按月汇总表 Excel (新增：追加 5 列动态价格计算)
 # =====================================================================
 @app.post("/process-billing")
 async def process_billing(files: List[UploadFile] = File(...)):
     try:
-        gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
+        gp_tx, gp_crm, sp_tx, sp_crm, rate_file = None, None, None, None, None
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: pass
+            if 'threshold' in name: rate_file = f
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
             elif 'goparkin' in name: gp_tx = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
@@ -58,6 +58,7 @@ async def process_billing(files: List[UploadFile] = File(...)):
         if not gp_crm: missing.append("GoParkin CRM")
         if not sp_tx: missing.append("SP Transaction")
         if not sp_crm: missing.append("SP CRM")
+        if not rate_file: missing.append("Threshold and Rate")
         
         if missing:
             received_names = [f.filename for f in files] if files else ["No files received"]
@@ -71,7 +72,19 @@ async def process_billing(files: List[UploadFile] = File(...)):
         df_gp  = await load_dataframe(gp_tx)
         crm_sp = await load_dataframe(sp_crm)
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
+        df_rates = await load_dataframe(rate_file)
+        
+        # 将价格表转换为字典以便快速查询
+        rates_dict = {}
+        for _, row in df_rates.iterrows():
+            comp_name = str(row.get('company', '')).strip().lower()
+            rates_dict[comp_name] = {
+                'base': pd.to_numeric(row.get('base', 0), errors='coerce'),
+                'threshold': pd.to_numeric(row.get('Threshold', 0), errors='coerce'),
+                'discounted': pd.to_numeric(row.get('discounted', 0), errors='coerce')
+            }
 
+        # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
@@ -86,6 +99,7 @@ async def process_billing(files: List[UploadFile] = File(...)):
         gp_summary = gp_merged.groupby(['Company', 'Year-Month'])['total_energy_supplied_kwh'].sum().reset_index()
         gp_summary.rename(columns={'total_energy_supplied_kwh': 'GoParkin(kWh)'}, inplace=True)
 
+        # SP 清洗
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
@@ -97,8 +111,30 @@ async def process_billing(files: List[UploadFile] = File(...)):
         sp_summary = sp_merged.groupby(['Company', 'Year-Month'])['CDR Total Energy'].sum().reset_index()
         sp_summary.rename(columns={'CDR Total Energy': 'SP(kWh)'}, inplace=True)
 
+        # 合并两边电量
         final_df = pd.merge(gp_summary, sp_summary, on=['Company', 'Year-Month'], how='outer').fillna(0)
         final_df['Total(kWh)'] = final_df.get('GoParkin(kWh)', 0) + final_df.get('SP(kWh)', 0)
+
+        # ======== 核心：计算追加的 5 列价格信息 ========
+        def calculate_pricing(row):
+            comp_key = str(row['Company']).strip().lower()
+            r_info = rates_dict.get(comp_key, {'base': 0, 'threshold': float('inf'), 'discounted': 0})
+            
+            base_rate = r_info['base'] if pd.notna(r_info['base']) else 0
+            threshold = r_info['threshold'] if pd.notna(r_info['threshold']) else float('inf')
+            discounted = r_info['discounted'] if pd.notna(r_info['discounted']) else 0
+            
+            # 判断逻辑：是否超过阈值
+            applied_rate = discounted if row['Total(kWh)'] > threshold else base_rate
+            total_price = row['Total(kWh)'] * applied_rate
+            
+            # 格式化Threshold，如果无穷大则显示N/A
+            display_threshold = threshold if threshold != float('inf') else 'N/A'
+            
+            return pd.Series([display_threshold, base_rate, discounted, applied_rate, total_price])
+
+        final_df[['Threshold', 'Base Rate ($)', 'Discounted Rate ($)', 'Applied Rate ($)', 'Total Price ($)']] = final_df.apply(calculate_pricing, axis=1)
+        # =================================================
 
         output = io.BytesIO()
         months = sorted([m for m in final_df['Year-Month'].dropna().unique() if len(str(m)) == 7])
@@ -107,7 +143,14 @@ async def process_billing(files: List[UploadFile] = File(...)):
                 month_df = final_df[final_df['Year-Month'] == month].copy()
                 month_df = month_df.sort_values(by='Company').reset_index(drop=True)
                 month_df.insert(0, 'S/N', month_df.index + 1)
+                
+                # 写入数据
                 month_df.to_excel(writer, sheet_name=month, index=False)
+                
+                # 获取worksheet调整一下列宽让它更好看
+                worksheet = writer.sheets[month]
+                worksheet.set_column('B:B', 30) # Company 列加宽
+                worksheet.set_column('D:L', 15) # 数字列加宽
 
         excel_data = output.getvalue()
         del df_gp, df_sp, gp_merged, sp_merged, final_df
@@ -409,18 +452,15 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_veh)
                     elements.append(Spacer(1, 24))
 
-                    # --- 4. 详细充电子表 (新增逻辑) ---
+                    # --- 4. 详细充电子表 ---
                     elements.append(Paragraph("<b>3. Detailed Charging Log</b>", styles['Heading2']))
                     elements.append(Spacer(1, 10))
                     
                     for vehicle, grp in comp_df.groupby('Vehicle_Email'):
-                        # 添加该车辆/司机的专属标题
                         elements.append(Paragraph(f"<b>Vehicle / Driver Email:</b> {vehicle}", styles['Normal']))
                         elements.append(Spacer(1, 6))
                         
-                        # 准备明细表头
                         detail_data = [["Location", "Start Time", "End Time", "Energy (kWh)"]]
-                        
                         grp = grp.sort_values('Start Time')
                         veh_total = 0
                         for _, d_row in grp.iterrows():
@@ -432,25 +472,22 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                             ])
                             veh_total += d_row['Energy (kWh)']
                         
-                        # 添加汇总行
                         detail_data.append(["", "", "Total:", f"{veh_total:.2f}"])
                         
-                        # 渲染明细表 (设置合理的列宽以适应 A4 纸)
                         t_detail = Table(detail_data, colWidths=[150, 110, 110, 80])
                         t_detail.setStyle(TableStyle([
-                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#BDC3C7')), # 灰色表头
+                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#BDC3C7')), 
                             ('TEXTCOLOR', (0,0), (-1,0), colors.black),
                             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                             ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                            ('FONTNAME', (2,-1), (2,-1), 'Helvetica-Bold'), # 最后一行 Total 加粗
-                            ('FONTNAME', (3,-1), (3,-1), 'Helvetica-Bold'), # 最后一行总电量加粗
-                            ('BACKGROUND', (0,-1), (-1,-1), colors.whitesmoke), # 最后一行灰底
+                            ('FONTNAME', (2,-1), (2,-1), 'Helvetica-Bold'), 
+                            ('FONTNAME', (3,-1), (3,-1), 'Helvetica-Bold'), 
+                            ('BACKGROUND', (0,-1), (-1,-1), colors.whitesmoke), 
                         ]))
                         elements.append(t_detail)
                         elements.append(Spacer(1, 16))
 
-                    # 渲染整个公司的 PDF 并打入压缩包
                     doc.build(elements)
                     
                     safe_comp = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
