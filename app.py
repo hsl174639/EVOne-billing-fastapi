@@ -18,7 +18,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! 3-in-1 Endpoints with Safety Checks enabled!"}
+    return {"status": "✅ API is running! 3-in-1 Endpoints with Ultimate Safety Checks enabled!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -47,18 +47,25 @@ async def process_billing(files: List[UploadFile] = File(...)):
         gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
         for f in files:
             name = f.filename.lower()
-            if 'goparkin' in name and ('transaction' in name or 'row' in name): gp_tx = f
+            if 'threshold' in name: pass # 汇总表不需要处理这个文件，直接跳过
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
+            elif 'goparkin' in name: gp_tx = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
+            elif 'evone' in name: sp_tx = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
         if not gp_crm: missing.append("GoParkin CRM")
         if not sp_tx: missing.append("SP Transaction")
         if not sp_crm: missing.append("SP CRM")
+        
         if missing:
-            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+            received_names = [f.filename for f in files] if files else ["No files received"]
+            return {
+                "error": True, 
+                "message": f"Missing files for: {', '.join(missing)}",
+                "received_files_by_python": received_names
+            }
 
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
@@ -119,18 +126,25 @@ async def process_details(files: List[UploadFile] = File(...)):
         gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
         for f in files:
             name = f.filename.lower()
-            if 'goparkin' in name and ('transaction' in name or 'row' in name): gp_tx = f
+            if 'threshold' in name: pass
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
+            elif 'goparkin' in name: gp_tx = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
+            elif 'evone' in name: sp_tx = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
         if not gp_crm: missing.append("GoParkin CRM")
         if not sp_tx: missing.append("SP Transaction")
         if not sp_crm: missing.append("SP CRM")
+        
         if missing:
-            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+            received_names = [f.filename for f in files] if files else ["No files received"]
+            return {
+                "error": True, 
+                "message": f"Missing files for: {', '.join(missing)}",
+                "received_files_by_python": received_names
+            }
 
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
@@ -247,22 +261,26 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         
         for f in files:
             name = f.filename.lower()
-            # 👉 【修复】严格识别小写 threshold and rate
-            if 'threshold and rate' in name: rate_file = f
-            elif 'goparkin' in name and ('transaction' in name or 'row' in name): gp_tx = f
+            if 'threshold' in name: rate_file = f
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
+            elif 'goparkin' in name: gp_tx = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name and ('report' in name or 'breakdown' in name or 'fleet' in name): sp_tx = f
+            elif 'evone' in name: sp_tx = f
 
-        # 👉 【修复】报错提示统一为小写
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
         if not gp_crm: missing.append("GoParkin CRM")
         if not sp_tx: missing.append("SP Transaction")
         if not sp_crm: missing.append("SP CRM")
-        if not rate_file: missing.append("threshold and rate")
+        if not rate_file: missing.append("Threshold and Rate")
+        
         if missing:
-            return {"error": True, "message": f"Missing files for: {', '.join(missing)}"}
+            received_names = [f.filename for f in files] if files else ["No files received"]
+            return {
+                "error": True, 
+                "message": f"Missing files for: {', '.join(missing)}",
+                "received_files_by_python": received_names
+            }
 
         crm_gp = await load_dataframe(gp_crm)
         df_gp  = await load_dataframe(gp_tx)
