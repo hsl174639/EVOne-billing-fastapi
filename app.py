@@ -202,7 +202,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                     row += 1
                 
                 row += 3
-                worksheet.write(row, 0, "==== 详细充电流水 ====", title_fmt)
+                worksheet.write(row, 0, "Detailed Report", title_fmt)
                 row += 2
                 for vehicle, grp in comp_df.groupby('Vehicle_Email'):
                     worksheet.merge_range(row, 0, row, 1, "Vehicle / Driver Email:", header_green)
