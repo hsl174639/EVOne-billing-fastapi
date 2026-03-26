@@ -18,7 +18,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! 3-in-1 Endpoints with Ultimate Safety Checks enabled!"}
+    return {"status": "✅ API is running! PDF now includes Detailed Transaction Logs!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -47,7 +47,7 @@ async def process_billing(files: List[UploadFile] = File(...)):
         gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: pass # 汇总表不需要处理这个文件，直接跳过
+            if 'threshold' in name: pass
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
             elif 'goparkin' in name: gp_tx = f
             elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
@@ -252,7 +252,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】
+# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含明细记录)
 # =====================================================================
 @app.post("/process-pdf")
 async def process_pdf(files: List[UploadFile] = File(...)):
@@ -366,12 +366,14 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements = []
                     styles = getSampleStyleSheet()
                     
+                    # --- 1. PDF 标题部分 ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
                     elements.append(Paragraph(f"<b>Billing Month:</b> {month}", styles['Normal']))
                     elements.append(Spacer(1, 20))
                     
+                    # --- 2. 价格汇总表 ---
                     elements.append(Paragraph("<b>1. Billing Summary</b>", styles['Heading2']))
                     summary_data = [
                         ["Total Energy (kWh)", "Threshold Limit", "Applied Rate ($)", "Total Amount ($)"],
@@ -389,6 +391,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_summary)
                     elements.append(Spacer(1, 24))
                     
+                    # --- 3. 车辆用量汇总表 ---
                     elements.append(Paragraph("<b>2. Vehicle Breakdown</b>", styles['Heading2']))
                     veh_summary = comp_df.groupby('Vehicle_Email')['Energy (kWh)'].sum().reset_index().sort_values('Energy (kWh)', ascending=False)
                     veh_data = [["Vehicle / Driver Email", "Energy Used (kWh)"]]
@@ -404,7 +407,50 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         ('GRID', (0,0), (-1,-1), 1, colors.black)
                     ]))
                     elements.append(t_veh)
+                    elements.append(Spacer(1, 24))
 
+                    # --- 4. 详细充电子表 (新增逻辑) ---
+                    elements.append(Paragraph("<b>3. Detailed Charging Log</b>", styles['Heading2']))
+                    elements.append(Spacer(1, 10))
+                    
+                    for vehicle, grp in comp_df.groupby('Vehicle_Email'):
+                        # 添加该车辆/司机的专属标题
+                        elements.append(Paragraph(f"<b>Vehicle / Driver Email:</b> {vehicle}", styles['Normal']))
+                        elements.append(Spacer(1, 6))
+                        
+                        # 准备明细表头
+                        detail_data = [["Location", "Start Time", "End Time", "Energy (kWh)"]]
+                        
+                        grp = grp.sort_values('Start Time')
+                        veh_total = 0
+                        for _, d_row in grp.iterrows():
+                            detail_data.append([
+                                str(d_row['Location']), 
+                                str(d_row['Start Time']), 
+                                str(d_row['End Time']), 
+                                f"{d_row['Energy (kWh)']:.2f}"
+                            ])
+                            veh_total += d_row['Energy (kWh)']
+                        
+                        # 添加汇总行
+                        detail_data.append(["", "", "Total:", f"{veh_total:.2f}"])
+                        
+                        # 渲染明细表 (设置合理的列宽以适应 A4 纸)
+                        t_detail = Table(detail_data, colWidths=[150, 110, 110, 80])
+                        t_detail.setStyle(TableStyle([
+                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#BDC3C7')), # 灰色表头
+                            ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+                            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                            ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                            ('FONTNAME', (2,-1), (2,-1), 'Helvetica-Bold'), # 最后一行 Total 加粗
+                            ('FONTNAME', (3,-1), (3,-1), 'Helvetica-Bold'), # 最后一行总电量加粗
+                            ('BACKGROUND', (0,-1), (-1,-1), colors.whitesmoke), # 最后一行灰底
+                        ]))
+                        elements.append(t_detail)
+                        elements.append(Spacer(1, 16))
+
+                    # 渲染整个公司的 PDF 并打入压缩包
                     doc.build(elements)
                     
                     safe_comp = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
