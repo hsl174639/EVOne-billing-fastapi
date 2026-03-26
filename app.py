@@ -18,7 +18,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! Invoice Summary now includes Dynamic Pricing!"}
+    return {"status": "✅ API is running! Invoice Summary, Details, and PDF are fully matched with actual Location data!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -39,7 +39,7 @@ async def load_dataframe(file: UploadFile, sheet_name=None):
         raise ValueError(f"Unsupported file format: {file.filename}")
 
 # =====================================================================
-# 接口 1：生成按月汇总表 Excel (新增：追加 5 列动态价格计算)
+# 接口 1：生成按月汇总表 Excel (带 5 列动态价格计算)
 # =====================================================================
 @app.post("/process-billing")
 async def process_billing(files: List[UploadFile] = File(...)):
@@ -74,7 +74,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
         df_sp  = await load_dataframe(sp_tx, sheet_name='EVOne Corporate fleet')
         df_rates = await load_dataframe(rate_file)
         
-        # 将价格表转换为字典以便快速查询
         rates_dict = {}
         for _, row in df_rates.iterrows():
             comp_name = str(row.get('company', '')).strip().lower()
@@ -84,7 +83,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
                 'discounted': pd.to_numeric(row.get('discounted', 0), errors='coerce')
             }
 
-        # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
@@ -99,7 +97,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
         gp_summary = gp_merged.groupby(['Company', 'Year-Month'])['total_energy_supplied_kwh'].sum().reset_index()
         gp_summary.rename(columns={'total_energy_supplied_kwh': 'GoParkin(kWh)'}, inplace=True)
 
-        # SP 清洗
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
@@ -111,11 +108,9 @@ async def process_billing(files: List[UploadFile] = File(...)):
         sp_summary = sp_merged.groupby(['Company', 'Year-Month'])['CDR Total Energy'].sum().reset_index()
         sp_summary.rename(columns={'CDR Total Energy': 'SP(kWh)'}, inplace=True)
 
-        # 合并两边电量
         final_df = pd.merge(gp_summary, sp_summary, on=['Company', 'Year-Month'], how='outer').fillna(0)
         final_df['Total(kWh)'] = final_df.get('GoParkin(kWh)', 0) + final_df.get('SP(kWh)', 0)
 
-        # ======== 核心：计算追加的 5 列价格信息 ========
         def calculate_pricing(row):
             comp_key = str(row['Company']).strip().lower()
             r_info = rates_dict.get(comp_key, {'base': 0, 'threshold': float('inf'), 'discounted': 0})
@@ -124,17 +119,13 @@ async def process_billing(files: List[UploadFile] = File(...)):
             threshold = r_info['threshold'] if pd.notna(r_info['threshold']) else float('inf')
             discounted = r_info['discounted'] if pd.notna(r_info['discounted']) else 0
             
-            # 判断逻辑：是否超过阈值
             applied_rate = discounted if row['Total(kWh)'] > threshold else base_rate
             total_price = row['Total(kWh)'] * applied_rate
             
-            # 格式化Threshold，如果无穷大则显示N/A
             display_threshold = threshold if threshold != float('inf') else 'N/A'
-            
             return pd.Series([display_threshold, base_rate, discounted, applied_rate, total_price])
 
         final_df[['Threshold', 'Base Rate ($)', 'Discounted Rate ($)', 'Applied Rate ($)', 'Total Price ($)']] = final_df.apply(calculate_pricing, axis=1)
-        # =================================================
 
         output = io.BytesIO()
         months = sorted([m for m in final_df['Year-Month'].dropna().unique() if len(str(m)) == 7])
@@ -143,14 +134,11 @@ async def process_billing(files: List[UploadFile] = File(...)):
                 month_df = final_df[final_df['Year-Month'] == month].copy()
                 month_df = month_df.sort_values(by='Company').reset_index(drop=True)
                 month_df.insert(0, 'S/N', month_df.index + 1)
-                
-                # 写入数据
                 month_df.to_excel(writer, sheet_name=month, index=False)
                 
-                # 获取worksheet调整一下列宽让它更好看
                 worksheet = writer.sheets[month]
-                worksheet.set_column('B:B', 30) # Company 列加宽
-                worksheet.set_column('D:L', 15) # 数字列加宽
+                worksheet.set_column('B:B', 30)
+                worksheet.set_column('D:L', 15)
 
         excel_data = output.getvalue()
         del df_gp, df_sp, gp_merged, sp_merged, final_df
@@ -213,6 +201,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
 
+        # 👉 【已修复】精准识别真实输入文件中的 Location 列名
         def extract_details(df, source):
             res = pd.DataFrame()
             if df.empty: return res
@@ -221,13 +210,13 @@ async def process_details(files: List[UploadFile] = File(...)):
                 res['Vehicle_Email'] = df['vehicle_plate_number']
                 res['Start Time'] = df.get('start_date_time', df['end_date_time'])
                 res['End Time'] = df['end_date_time']
-                res['Location'] = df.get('site_name', df.get('station_name', 'GoParkin Station'))
+                res['Location'] = df.get('carpark_code', df.get('site_name', 'GoParkin Station'))
                 res['Energy (kWh)'] = df['total_energy_supplied_kwh']
             else:
                 res['Vehicle_Email'] = df['Driver Email']
                 res['Start Time'] = df.get('Start Date', df.get('Date', ''))
                 res['End Time'] = df.get('End Date', df.get('Date', ''))
-                res['Location'] = df.get('Location', df.get('Station Name', 'SP Station'))
+                res['Location'] = df.get('Location Name', df.get('Location', 'SP Station'))
                 res['Energy (kWh)'] = df['CDR Total Energy']
             return res
 
@@ -247,7 +236,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                 safe_sheet_name = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
                 comp_df = all_details[all_details['Company'] == company]
                 worksheet = workbook.add_worksheet(safe_sheet_name)
-                worksheet.set_column(0, 0, 30)
+                worksheet.set_column(0, 0, 35)  # 稍微加宽 Location 的展示宽度
                 worksheet.set_column(1, 2, 22)
                 worksheet.set_column(3, 3, 18)
                 
@@ -295,7 +284,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含明细记录)
+# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含真实明细记录)
 # =====================================================================
 @app.post("/process-pdf")
 async def process_pdf(files: List[UploadFile] = File(...)):
@@ -340,7 +329,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                 'discounted': pd.to_numeric(row.get('discounted', 0), errors='coerce')
             }
 
-        # GoParkin 清洗
         crm_gp = crm_gp[['Vehicle No.', 'Company']].dropna()
         crm_gp['Vehicle No.'] = crm_gp['Vehicle No.'].astype(str).str.strip().str.upper()
         crm_gp = crm_gp.drop_duplicates(subset=['Vehicle No.'], keep='first')
@@ -352,7 +340,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         gp_merged = pd.merge(df_gp, crm_gp, left_on='vehicle_plate_number', right_on='Vehicle No.', how='left')
         gp_merged['Company'] = gp_merged['Company'].fillna('Unmatched GoParkin')
 
-        # SP 清洗
         crm_sp = crm_sp[['Email', 'Company']].dropna()
         crm_sp['Email'] = crm_sp['Email'].astype(str).str.strip().str.lower()
         crm_sp = crm_sp.drop_duplicates(subset=['Email'], keep='first')
@@ -361,6 +348,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
 
+        # 👉 【已修复】精准识别真实输入文件中的 Location 列名
         def extract_details(df, source):
             res = pd.DataFrame()
             if df.empty: return res
@@ -369,13 +357,13 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                 res['Vehicle_Email'] = df['vehicle_plate_number']
                 res['Start Time'] = df.get('start_date_time', df['end_date_time'])
                 res['End Time'] = df['end_date_time']
-                res['Location'] = df.get('site_name', df.get('station_name', 'GoParkin Station'))
+                res['Location'] = df.get('carpark_code', df.get('site_name', 'GoParkin Station'))
                 res['Energy (kWh)'] = df['total_energy_supplied_kwh']
             else:
                 res['Vehicle_Email'] = df['Driver Email']
                 res['Start Time'] = df.get('Start Date', df.get('Date', ''))
                 res['End Time'] = df.get('End Date', df.get('Date', ''))
-                res['Location'] = df.get('Location', df.get('Station Name', 'SP Station'))
+                res['Location'] = df.get('Location Name', df.get('Location', 'SP Station'))
                 res['Energy (kWh)'] = df['CDR Total Energy']
             return res
 
@@ -409,14 +397,12 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements = []
                     styles = getSampleStyleSheet()
                     
-                    # --- 1. PDF 标题部分 ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
                     elements.append(Paragraph(f"<b>Billing Month:</b> {month}", styles['Normal']))
                     elements.append(Spacer(1, 20))
                     
-                    # --- 2. 价格汇总表 ---
                     elements.append(Paragraph("<b>1. Billing Summary</b>", styles['Heading2']))
                     summary_data = [
                         ["Total Energy (kWh)", "Threshold Limit", "Applied Rate ($)", "Total Amount ($)"],
@@ -434,7 +420,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_summary)
                     elements.append(Spacer(1, 24))
                     
-                    # --- 3. 车辆用量汇总表 ---
                     elements.append(Paragraph("<b>2. Vehicle Breakdown</b>", styles['Heading2']))
                     veh_summary = comp_df.groupby('Vehicle_Email')['Energy (kWh)'].sum().reset_index().sort_values('Energy (kWh)', ascending=False)
                     veh_data = [["Vehicle / Driver Email", "Energy Used (kWh)"]]
@@ -452,7 +437,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_veh)
                     elements.append(Spacer(1, 24))
 
-                    # --- 4. 详细充电子表 ---
                     elements.append(Paragraph("<b>3. Detailed Charging Log</b>", styles['Heading2']))
                     elements.append(Spacer(1, 10))
                     
@@ -474,7 +458,8 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         
                         detail_data.append(["", "", "Total:", f"{veh_total:.2f}"])
                         
-                        t_detail = Table(detail_data, colWidths=[150, 110, 110, 80])
+                        # PDF 表格宽度微调，给 Location 更多的展示空间
+                        t_detail = Table(detail_data, colWidths=[170, 100, 100, 80])
                         t_detail.setStyle(TableStyle([
                             ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#BDC3C7')), 
                             ('TEXTCOLOR', (0,0), (-1,0), colors.black),
