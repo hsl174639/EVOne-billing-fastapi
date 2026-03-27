@@ -6,9 +6,10 @@ import io
 import warnings
 import gc
 import zipfile
+import os
 
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 
@@ -18,7 +19,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! Invoice Summary, Details, and PDF are fully matched with actual Location data!"}
+    return {"status": "✅ API is running! PDF now uses custom EV Green (#00ad5f) for headers!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -201,7 +202,6 @@ async def process_details(files: List[UploadFile] = File(...)):
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
 
-        # 👉 【已修复】精准识别真实输入文件中的 Location 列名
         def extract_details(df, source):
             res = pd.DataFrame()
             if df.empty: return res
@@ -227,7 +227,8 @@ async def process_details(files: List[UploadFile] = File(...)):
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             workbook = writer.book
             title_fmt = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
-            header_green = workbook.add_format({'bg_color': '#1ABC9C', 'font_color': 'white', 'bold': True, 'align': 'center', 'border': 1})
+            # 更改 Excel 表头为主色调 #00ad5f
+            header_green = workbook.add_format({'bg_color': '#00ad5f', 'font_color': 'white', 'bold': True, 'align': 'center', 'border': 1})
             footer_green = workbook.add_format({'bg_color': '#A3E4D7', 'bold': True, 'align': 'right', 'border': 1})
             cell_normal = workbook.add_format({'align': 'center', 'border': 1})
 
@@ -236,7 +237,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                 safe_sheet_name = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
                 comp_df = all_details[all_details['Company'] == company]
                 worksheet = workbook.add_worksheet(safe_sheet_name)
-                worksheet.set_column(0, 0, 35)  # 稍微加宽 Location 的展示宽度
+                worksheet.set_column(0, 0, 35)
                 worksheet.set_column(1, 2, 22)
                 worksheet.set_column(3, 3, 18)
                 
@@ -284,7 +285,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含真实明细记录)
+# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含公司 Logo 和统一表头)
 # =====================================================================
 @app.post("/process-pdf")
 async def process_pdf(files: List[UploadFile] = File(...)):
@@ -348,7 +349,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         sp_merged = pd.merge(df_sp, crm_sp, left_on='Driver Email', right_on='Email', how='left')
         sp_merged['Company'] = sp_merged['Company'].fillna('Unmatched SP Email')
 
-        # 👉 【已修复】精准识别真实输入文件中的 Location 列名
         def extract_details(df, source):
             res = pd.DataFrame()
             if df.empty: return res
@@ -397,12 +397,22 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements = []
                     styles = getSampleStyleSheet()
                     
+                    # --- 0. 添加公司 Logo (如果存在) ---
+                    logo_path = "logo.png"
+                    if os.path.exists(logo_path):
+                        logo_img = Image(logo_path, width=120, height=40) 
+                        logo_img.hAlign = 'LEFT'
+                        elements.append(logo_img)
+                        elements.append(Spacer(1, 10))
+
+                    # --- 1. PDF 标题部分 ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
                     elements.append(Paragraph(f"<b>Billing Month:</b> {month}", styles['Normal']))
                     elements.append(Spacer(1, 20))
                     
+                    # --- 2. 价格汇总表 ---
                     elements.append(Paragraph("<b>1. Billing Summary</b>", styles['Heading2']))
                     summary_data = [
                         ["Total Energy (kWh)", "Threshold Limit", "Applied Rate ($)", "Total Amount ($)"],
@@ -410,8 +420,8 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     ]
                     t_summary = Table(summary_data, colWidths=[120, 110, 110, 120])
                     t_summary.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1ABC9C')),
-                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
                         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                         ('BOTTOMPADDING', (0,0), (-1,0), 10),
@@ -420,6 +430,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_summary)
                     elements.append(Spacer(1, 24))
                     
+                    # --- 3. 车辆用量汇总表 ---
                     elements.append(Paragraph("<b>2. Vehicle Breakdown</b>", styles['Heading2']))
                     veh_summary = comp_df.groupby('Vehicle_Email')['Energy (kWh)'].sum().reset_index().sort_values('Energy (kWh)', ascending=False)
                     veh_data = [["Vehicle / Driver Email", "Energy Used (kWh)"]]
@@ -428,8 +439,8 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     
                     t_veh = Table(veh_data, colWidths=[250, 150])
                     t_veh.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#34495E')),
-                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
                         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                         ('GRID', (0,0), (-1,-1), 1, colors.black)
@@ -437,6 +448,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_veh)
                     elements.append(Spacer(1, 24))
 
+                    # --- 4. 详细充电子表 ---
                     elements.append(Paragraph("<b>3. Detailed Charging Log</b>", styles['Heading2']))
                     elements.append(Spacer(1, 10))
                     
@@ -458,11 +470,10 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         
                         detail_data.append(["", "", "Total:", f"{veh_total:.2f}"])
                         
-                        # PDF 表格宽度微调，给 Location 更多的展示空间
                         t_detail = Table(detail_data, colWidths=[170, 100, 100, 80])
                         t_detail.setStyle(TableStyle([
-                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#BDC3C7')), 
-                            ('TEXTCOLOR', (0,0), (-1,0), colors.black),
+                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
                             ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
