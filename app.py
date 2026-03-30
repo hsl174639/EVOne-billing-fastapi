@@ -19,7 +19,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! PDF now uses custom EV Green (#00ad5f) for headers!"}
+    return {"status": "✅ API is running! PDF now includes rate details in the header!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -227,7 +227,6 @@ async def process_details(files: List[UploadFile] = File(...)):
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             workbook = writer.book
             title_fmt = workbook.add_format({'bold': True, 'font_size': 14, 'align': 'left'})
-            # 更改 Excel 表头为主色调 #00ad5f
             header_green = workbook.add_format({'bg_color': '#00ad5f', 'font_color': 'white', 'bold': True, 'align': 'center', 'border': 1})
             footer_green = workbook.add_format({'bg_color': '#A3E4D7', 'bold': True, 'align': 'right', 'border': 1})
             cell_normal = workbook.add_format({'align': 'center', 'border': 1})
@@ -285,7 +284,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(含公司 Logo 和统一表头)
+# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】
 # =====================================================================
 @app.post("/process-pdf")
 async def process_pdf(files: List[UploadFile] = File(...)):
@@ -397,7 +396,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements = []
                     styles = getSampleStyleSheet()
                     
-                    # --- 0. 添加公司 Logo (如果存在) ---
+                    # --- 0. 添加公司 Logo ---
                     logo_path = "logo.png"
                     if os.path.exists(logo_path):
                         logo_img = Image(logo_path, width=120, height=40) 
@@ -405,11 +404,20 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         elements.append(logo_img)
                         elements.append(Spacer(1, 10))
 
-                    # --- 1. PDF 标题部分 ---
+                    # --- 1. PDF 标题部分 (新增计费参数明细) ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
                     elements.append(Paragraph(f"<b>Billing Month:</b> {month}", styles['Normal']))
+                    
+                    # 动态格式化 Threshold 的显示
+                    disp_thresh = f"{threshold:g}" if threshold != float('inf') else "N/A"
+                    
+                    elements.append(Paragraph(f"<b>Threshold Limit:</b> {disp_thresh}", styles['Normal']))
+                    elements.append(Paragraph(f"<b>Base Rate:</b> ${base_rate:.2f}", styles['Normal']))
+                    elements.append(Paragraph(f"<b>Discounted Rate:</b> ${discounted:.2f}", styles['Normal']))
+                    elements.append(Paragraph(f"<b>Applied Rate:</b> ${applied_rate:.2f}", styles['Normal']))
+                    
                     elements.append(Spacer(1, 20))
                     
                     # --- 2. 价格汇总表 ---
@@ -420,7 +428,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     ]
                     t_summary = Table(summary_data, colWidths=[120, 110, 110, 120])
                     t_summary.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), 
                         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
                         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
@@ -439,7 +447,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     
                     t_veh = Table(veh_data, colWidths=[250, 150])
                     t_veh.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), 
                         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke), 
                         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
@@ -472,7 +480,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         
                         t_detail = Table(detail_data, colWidths=[170, 100, 100, 80])
                         t_detail.setStyle(TableStyle([
-                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), # 更换为主色调
+                            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#00ad5f')), 
                             ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
