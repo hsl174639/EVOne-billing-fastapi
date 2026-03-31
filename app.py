@@ -19,25 +19,26 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! File matching rules updated for gp_transaction and sp_transaction!"}
+    return {"status": "✅ API is running! Fully adapted to Google Sheets (No Extension) format!"}
 
-# --- 辅助函数：极致省内存的文件读取方式 ---
+# --- 辅助函数：无视后缀名的终极 Excel 读取器 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
     if not file:
         raise ValueError("File is missing!")
     name = file.filename.lower()
+    
+    # 如果明确是 CSV 格式，按 CSV 读
     if name.endswith('.csv'):
         return pd.read_csv(file.file)
-    elif name.endswith(('.xls', '.xlsx')):
-        if sheet_name:
-            try:
-                return pd.read_excel(file.file, sheet_name=sheet_name)
-            except Exception:
-                file.file.seek(0)
-                return pd.read_excel(file.file)
-        return pd.read_excel(file.file)
-    else:
-        raise ValueError(f"Unsupported file format: {file.filename}")
+    
+    # 否则，一律按 Excel 处理 (完美兼容 n8n 从 Google Sheet 导出时不带 .xlsx 后缀的暗坑)
+    if sheet_name:
+        try:
+            return pd.read_excel(file.file, sheet_name=sheet_name)
+        except Exception:
+            file.file.seek(0)
+            return pd.read_excel(file.file)
+    return pd.read_excel(file.file)
 
 # =====================================================================
 # 接口 1：生成按月汇总表 Excel (带 5 列动态价格计算)
@@ -47,19 +48,19 @@ async def process_billing(files: List[UploadFile] = File(...)):
     try:
         gp_tx, gp_crm, sp_tx, sp_crm, rate_file = None, None, None, None, None
         
-        # 👉 【关键修复】更新文件匹配逻辑，精准捕捉新文件名
+        # 👉 【精准安检系统】严格锁定极简关键词，互不干扰
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: 
+            if 'threshold' in name or 'rate' in name: 
                 rate_file = f
-            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): 
+            elif ('gp' in name or 'goparkin' in name) and ('vehicle' in name or 'crm' in name): 
                 gp_crm = f
-            elif 'gp_transaction' in name or 'goparkin' in name: 
-                gp_tx = f
-            elif 'sp_transaction' in name or 'evone' in name: 
-                sp_tx = f
-            elif 'sp' in name and ('crm' in name or 'vehicle' in name): 
+            elif ('sp' in name or 'evone' in name) and ('vehicle' in name or 'crm' in name): 
                 sp_crm = f
+            elif ('gp' in name or 'goparkin' in name) and ('transaction' in name or 'row' in name): 
+                gp_tx = f
+            elif ('sp' in name or 'evone' in name) and ('transaction' in name or 'report' in name or 'breakdown' in name): 
+                sp_tx = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -163,13 +164,19 @@ async def process_billing(files: List[UploadFile] = File(...)):
 async def process_details(files: List[UploadFile] = File(...)):
     try:
         gp_tx, gp_crm, sp_tx, sp_crm = None, None, None, None
+        
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: pass
-            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
-            elif 'gp_transaction' in name or 'goparkin' in name: gp_tx = f
-            elif 'sp_transaction' in name or 'evone' in name: sp_tx = f
-            elif 'sp' in name and ('crm' in name or 'vehicle' in name): sp_crm = f
+            if 'threshold' in name or 'rate' in name: 
+                pass
+            elif ('gp' in name or 'goparkin' in name) and ('vehicle' in name or 'crm' in name): 
+                gp_crm = f
+            elif ('sp' in name or 'evone' in name) and ('vehicle' in name or 'crm' in name): 
+                sp_crm = f
+            elif ('gp' in name or 'goparkin' in name) and ('transaction' in name or 'row' in name): 
+                gp_tx = f
+            elif ('sp' in name or 'evone' in name) and ('transaction' in name or 'report' in name or 'breakdown' in name): 
+                sp_tx = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -300,11 +307,16 @@ async def process_pdf(files: List[UploadFile] = File(...)):
         
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: rate_file = f
-            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
-            elif 'gp_transaction' in name or 'goparkin' in name: gp_tx = f
-            elif 'sp_transaction' in name or 'evone' in name: sp_tx = f
-            elif 'sp' in name and ('crm' in name or 'vehicle' in name): sp_crm = f
+            if 'threshold' in name or 'rate' in name: 
+                rate_file = f
+            elif ('gp' in name or 'goparkin' in name) and ('vehicle' in name or 'crm' in name): 
+                gp_crm = f
+            elif ('sp' in name or 'evone' in name) and ('vehicle' in name or 'crm' in name): 
+                sp_crm = f
+            elif ('gp' in name or 'goparkin' in name) and ('transaction' in name or 'row' in name): 
+                gp_tx = f
+            elif ('sp' in name or 'evone' in name) and ('transaction' in name or 'report' in name or 'breakdown' in name): 
+                sp_tx = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -403,7 +415,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements = []
                     styles = getSampleStyleSheet()
                     
-                    # --- 0. 添加公司 Logo ---
                     logo_path = "logo.png"
                     if os.path.exists(logo_path):
                         logo_img = Image(logo_path, width=120, height=40) 
@@ -411,7 +422,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         elements.append(logo_img)
                         elements.append(Spacer(1, 10))
 
-                    # --- 1. PDF 标题部分 ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
@@ -426,7 +436,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     
                     elements.append(Spacer(1, 20))
                     
-                    # --- 2. 价格汇总表 ---
                     elements.append(Paragraph("<b>1. Billing Summary</b>", styles['Heading2']))
                     summary_data = [
                         ["Total Energy (kWh)", "Threshold Limit", "Applied Rate ($)", "Total Amount ($)"],
@@ -444,7 +453,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_summary)
                     elements.append(Spacer(1, 24))
                     
-                    # --- 3. 车辆用量汇总表 ---
                     elements.append(Paragraph("<b>2. Vehicle Breakdown</b>", styles['Heading2']))
                     veh_summary = comp_df.groupby('Vehicle_Email')['Energy (kWh)'].sum().reset_index().sort_values('Energy (kWh)', ascending=False)
                     veh_data = [["Vehicle / Driver Email", "Energy Used (kWh)"]]
@@ -462,7 +470,6 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                     elements.append(t_veh)
                     elements.append(Spacer(1, 24))
 
-                    # --- 4. 详细充电子表 ---
                     elements.append(Paragraph("<b>3. Detailed Charging Log</b>", styles['Heading2']))
                     elements.append(Spacer(1, 10))
                     
