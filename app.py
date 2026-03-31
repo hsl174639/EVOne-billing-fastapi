@@ -19,7 +19,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! PDF now includes rate details in the header!"}
+    return {"status": "✅ API is running! File matching rules updated for gp_transaction and sp_transaction!"}
 
 # --- 辅助函数：极致省内存的文件读取方式 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -46,13 +46,20 @@ async def load_dataframe(file: UploadFile, sheet_name=None):
 async def process_billing(files: List[UploadFile] = File(...)):
     try:
         gp_tx, gp_crm, sp_tx, sp_crm, rate_file = None, None, None, None, None
+        
+        # 👉 【关键修复】更新文件匹配逻辑，精准捕捉新文件名
         for f in files:
             name = f.filename.lower()
-            if 'threshold' in name: rate_file = f
-            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
-            elif 'goparkin' in name: gp_tx = f
-            elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name: sp_tx = f
+            if 'threshold' in name: 
+                rate_file = f
+            elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): 
+                gp_crm = f
+            elif 'gp_transaction' in name or 'goparkin' in name: 
+                gp_tx = f
+            elif 'sp_transaction' in name or 'evone' in name: 
+                sp_tx = f
+            elif 'sp' in name and ('crm' in name or 'vehicle' in name): 
+                sp_crm = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -160,9 +167,9 @@ async def process_details(files: List[UploadFile] = File(...)):
             name = f.filename.lower()
             if 'threshold' in name: pass
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
-            elif 'goparkin' in name: gp_tx = f
-            elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name: sp_tx = f
+            elif 'gp_transaction' in name or 'goparkin' in name: gp_tx = f
+            elif 'sp_transaction' in name or 'evone' in name: sp_tx = f
+            elif 'sp' in name and ('crm' in name or 'vehicle' in name): sp_crm = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -251,7 +258,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                     row += 1
                 
                 row += 3
-                worksheet.write(row, 0, "Detailed Charging Log", title_fmt)
+                worksheet.write(row, 0, "==== Detailed Charging Log ====", title_fmt)
                 row += 2
                 for vehicle, grp in comp_df.groupby('Vehicle_Email'):
                     worksheet.merge_range(row, 0, row, 1, "Vehicle / Driver Email:", header_green)
@@ -295,9 +302,9 @@ async def process_pdf(files: List[UploadFile] = File(...)):
             name = f.filename.lower()
             if 'threshold' in name: rate_file = f
             elif 'goparkin' in name and ('crm' in name or 'vehicle' in name): gp_crm = f
-            elif 'goparkin' in name: gp_tx = f
-            elif ('sp ' in name or '_sp' in name or 'sp_' in name) and ('crm' in name or 'vehicle' in name): sp_crm = f
-            elif 'evone' in name: sp_tx = f
+            elif 'gp_transaction' in name or 'goparkin' in name: gp_tx = f
+            elif 'sp_transaction' in name or 'evone' in name: sp_tx = f
+            elif 'sp' in name and ('crm' in name or 'vehicle' in name): sp_crm = f
 
         missing = []
         if not gp_tx: missing.append("GoParkin Transaction")
@@ -404,13 +411,12 @@ async def process_pdf(files: List[UploadFile] = File(...)):
                         elements.append(logo_img)
                         elements.append(Spacer(1, 10))
 
-                    # --- 1. PDF 标题部分 (新增计费参数明细) ---
+                    # --- 1. PDF 标题部分 ---
                     elements.append(Paragraph(f"<b>Corporate Charging Statement</b>", styles['Title']))
                     elements.append(Spacer(1, 12))
                     elements.append(Paragraph(f"<b>Company:</b> {company}", styles['Normal']))
                     elements.append(Paragraph(f"<b>Billing Month:</b> {month}", styles['Normal']))
                     
-                    # 动态格式化 Threshold 的显示
                     disp_thresh = f"{threshold:g}" if threshold != float('inf') else "N/A"
                     
                     elements.append(Paragraph(f"<b>Threshold Limit:</b> {disp_thresh}", styles['Normal']))
