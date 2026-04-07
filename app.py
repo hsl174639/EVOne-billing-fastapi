@@ -19,7 +19,7 @@ app = FastAPI(title="EV Billing Ultimate API")
 
 @app.get("/")
 def read_root():
-    return {"status": "✅ API is running! Fully adapted to Google Sheets (No Extension) format!"}
+    return {"status": "✅ API is running! PDF now uses FULL company names!"}
 
 # --- 辅助函数：无视后缀名的终极 Excel 读取器 ---
 async def load_dataframe(file: UploadFile, sheet_name=None):
@@ -27,11 +27,9 @@ async def load_dataframe(file: UploadFile, sheet_name=None):
         raise ValueError("File is missing!")
     name = file.filename.lower()
     
-    # 如果明确是 CSV 格式，按 CSV 读
     if name.endswith('.csv'):
         return pd.read_csv(file.file)
     
-    # 否则，一律按 Excel 处理 (完美兼容 n8n 从 Google Sheet 导出时不带 .xlsx 后缀的暗坑)
     if sheet_name:
         try:
             return pd.read_excel(file.file, sheet_name=sheet_name)
@@ -48,7 +46,6 @@ async def process_billing(files: List[UploadFile] = File(...)):
     try:
         gp_tx, gp_crm, sp_tx, sp_crm, rate_file = None, None, None, None, None
         
-        # 👉 【精准安检系统】严格锁定极简关键词，互不干扰
         for f in files:
             name = f.filename.lower()
             if 'threshold' in name or 'rate' in name: 
@@ -158,7 +155,7 @@ async def process_billing(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 2：生成一公司一页的【绿色排版高级明细表 Excel】
+# 接口 2：生成一公司一页的【绿色排版高级明细表 Excel】(保留 31 字符防崩溃)
 # =====================================================================
 @app.post("/process-details")
 async def process_details(files: List[UploadFile] = File(...)):
@@ -246,8 +243,20 @@ async def process_details(files: List[UploadFile] = File(...)):
             cell_normal = workbook.add_format({'align': 'center', 'border': 1})
 
             unique_companies = all_details['Company'].dropna().unique()
+            used_sheet_names = set() 
+
             for company in unique_companies:
-                safe_sheet_name = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
+                base_name = str(company).replace('/', '').replace('\\', '').replace(':', '').replace('*', '').replace('?', '').replace('[', '').replace(']', '').strip()
+                safe_sheet_name = base_name[:31] 
+                
+                counter = 1
+                while safe_sheet_name.lower() in used_sheet_names:
+                    suffix = f"_{counter}"
+                    safe_sheet_name = base_name[:31 - len(suffix)] + suffix
+                    counter += 1
+                
+                used_sheet_names.add(safe_sheet_name.lower())
+
                 comp_df = all_details[all_details['Company'] == company]
                 worksheet = workbook.add_worksheet(safe_sheet_name)
                 worksheet.set_column(0, 0, 35)
@@ -265,7 +274,7 @@ async def process_details(files: List[UploadFile] = File(...)):
                     row += 1
                 
                 row += 3
-                worksheet.write(row, 0, "Detailed Charging Log", title_fmt)
+                worksheet.write(row, 0, "==== Detailed Charging Log ====", title_fmt)
                 row += 2
                 for vehicle, grp in comp_df.groupby('Vehicle_Email'):
                     worksheet.merge_range(row, 0, row, 1, "Vehicle / Driver Email:", header_green)
@@ -298,7 +307,7 @@ async def process_details(files: List[UploadFile] = File(...)):
         return {"error": True, "message": str(e)}
 
 # =====================================================================
-# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】
+# 接口 3：生成带有 Threshold 阶梯价格的【独立 PDF 压缩包】(使用全名)
 # =====================================================================
 @app.post("/process-pdf")
 async def process_pdf(files: List[UploadFile] = File(...)):
@@ -395,6 +404,7 @@ async def process_pdf(files: List[UploadFile] = File(...)):
             for month in months:
                 month_df = all_details[all_details['Year-Month'] == month]
                 unique_companies = month_df['Company'].dropna().unique()
+                used_file_names = set()
                 
                 for company in unique_companies:
                     comp_df = month_df[month_df['Company'] == company]
@@ -507,7 +517,17 @@ async def process_pdf(files: List[UploadFile] = File(...)):
 
                     doc.build(elements)
                     
-                    safe_comp = str(company)[:30].replace('/', '').replace(':', '').replace('*', '').replace('?', '')
+                    # 👉 PDF 命名：提取全名，仅剔除操作系统不允许的特殊符号，不做长度截断
+                    base_name = str(company).replace('/', '-').replace('\\', '-').replace(':', '').replace('*', '').replace('?', '').replace('"', '').replace('<', '').replace('>', '').replace('|', '').strip()
+                    safe_comp = base_name
+                    
+                    # 保留防重名逻辑
+                    counter = 1
+                    while safe_comp.lower() in used_file_names:
+                        safe_comp = f"{base_name}_{counter}"
+                        counter += 1
+                    used_file_names.add(safe_comp.lower())
+
                     file_name = f"{month}/{safe_comp}_{month}.pdf"
                     zip_file.writestr(file_name, pdf_buf.getvalue())
 
